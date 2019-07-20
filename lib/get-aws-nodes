@@ -1,0 +1,24 @@
+#!/bin/bash
+
+function main() {
+  cd $(dirname $0)
+  [ -f settings ] && . settings || { err "file settings not found"; return 2; }
+
+
+  local fatal=0
+  [[ $CLOUD_PROVIDER ]] || { err "Missing setting CLOUD_PROVIDER"; fatal=1; }
+  [[ $CLUSTER_NAME ]] || { err "Missing setting CLUSTER_NAME"; fatal=1; }
+  [[ $DNS_DOMAIN ]] || { err "Missing setting DNS_DOMAIN"; fatal=1; }
+  [[ $AWS_KUBE_REGION ]] || { err "Missing setting AWS_KUBE_REGION"; fatal=1; }
+  [ $fatal -eq 1 ] && return 2
+
+  [[ "$CLOUD_PROVIDER" == "AWS" ]] || { err "Cloud provider must be AWS"; return 2; }
+
+  FQDN=${CLUSTER_NAME}.${DNS_DOMAIN}
+
+  aws ec2 --region $AWS_KUBE_REGION describe-instances --filters --filters "Name=iam-instance-profile.arn,Values=*$FQDN" --query "Reservations[*].Instances[*].PublicDnsName" --output text
+}
+
+err() { echo "$@" 1>&2; }
+
+main $@

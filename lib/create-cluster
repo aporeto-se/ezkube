@@ -1,0 +1,64 @@
+#!/bin/bash
+
+function main() {
+  cd $(dirname $0)
+  [ -f settings ] && . settings || { err "file settings not found"; return 2; }
+  local fatal=0
+  [[ $CLOUD_PROVIDER ]] || { err "Missing setting CLOUD_PROVIDER"; fatal=1; }
+  [[ $CLUSTER_NAME ]] || { err "Missing setting CLUSTER_NAME"; fatal=1; }
+  [[ $DNS_DOMAIN ]] || { err "Missing setting DNS_DOMAIN"; fatal=1; }
+  [ $fatal -eq 1 ] && return 2
+
+  SSHKEY=${HOME}/.ssh/aporeto_lab
+  FQDN=${CLUSTER_NAME}.${DNS_DOMAIN}
+
+  [ -f $SSHKEY ] || {
+    err "Key $SSHKEY is not present; copying from S3"
+    aws s3 cp s3://labkeys.aporeto.io/ssh/key $SSHKEY || return $?
+    chmod 400 ${HOME}/.ssh/aporeto_lab || return $?
+    ssh-keygen -y -f $SSHKEY > ${SSHKEY}.pub || return $?
+  }
+
+  [ -f ${HOME}/.ssh/config ] || {
+    err "Warning: you did not have a ~/.ssh/config file so I will create one for you"
+    echo "IdentityFile ~/.ssh/id_ecdsa" >> ${HOME}/.ssh/config
+    echo "IdentityFile ~/.ssh/id_rsa" >> ${HOME}/.ssh/config
+    err "You might want to check it"
+  }
+
+  [[  $(cat ~/.ssh/config | grep aporeto_lab) ]] || {
+    echo "IdentityFile ~/.ssh/aporeto_lab" >> ${HOME}/.ssh/config
+  }
+
+  [[ "$CLOUD_PROVIDER" == "AWS" ]] && { _aws; return $?; }
+}
+
+_aws() {
+  local fatal=0
+  [[ $AWS_KUBE_REGION ]] || { err "Missing setting AWS_KUBE_REGION"; fatal=1; }
+  [[ $AWS_KUBE_ZONE ]] || { err "Missing setting AWS_KUBE_ZONE"; fatal=1; }
+  [ $fatal -eq 1 ] && return 2
+  bucket="s3://k8s.${FQDN}"
+  zones="${AWS_KUBE_REGION}${AWS_KUBE_ZONE}"
+  kops="kops create cluster"
+  kops+=" --name $FQDN"
+  kops+=" --zones=$zones"
+  kops+=" --master-size=$AWS_KUBE_MASTER_SIZE"
+  kops+=" --node-size=$AWS_KUBE_NODE_SIZE"
+  kops+=" --node-count=$AWS_KUBE_NODE_COUNT"
+  kops+=" --ssh-public-key=${SSHKEY}.pub"
+  kops+=" --state=${bucket}/state"
+  [[ $AWS_KUBE_VERSION ]] && kops+=" --kubernetes-version $AWS_KUBE_VERSION"
+  [[ $AWS_KUBE_IMAGE ]] && kops+=" --image $AWS_KUBE_IMAGE"
+  [[ $AWS_KUBE_CNI ]] && kops+=" --networking=$AWS_KUBE_CNI"
+  kops+=" --yes"
+  export KUBECONFIG=$PWD/kube.config
+  set -x
+  aws s3 mb $bucket || return $?
+  $kops || return $?
+  kops export kubecfg $FQDN --state=${bucket}/state || return $?
+}
+
+err() { echo "$@" 1>&2; }
+
+main $@

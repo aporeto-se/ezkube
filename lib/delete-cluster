@@ -1,0 +1,27 @@
+#!/bin/bash -e
+
+function main() {
+  cd $(dirname $0)
+  [ -f settings ] && . settings || { err "file settings not found"; return 2; }
+  local fatal=0
+  [[ $CLOUD_PROVIDER ]] || { err "Missing setting CLOUD_PROVIDER"; fatal=1; }
+  [[ $CLUSTER_NAME ]] || { err "Missing setting CLUSTER_NAME"; fatal=1; }
+  [[ $DNS_DOMAIN ]] || { err "Missing setting DNS_DOMAIN"; fatal=1; }
+  [ $fatal -eq 1 ] && return 2
+  FQDN=${CLUSTER_NAME}.${DNS_DOMAIN}
+
+  [[ "$CLOUD_PROVIDER" == "AWS" ]] && { _aws; return $?; }
+}
+
+_aws() {
+  local fatal=0
+  local bucket="s3://k8s.${FQDN}"
+
+  set -x
+  kops delete cluster --name $FQDN --state=${bucket}/state --yes
+  aws s3 rb $bucket --force
+}
+
+err() { echo "$@" 1>&2; }
+
+main $@
