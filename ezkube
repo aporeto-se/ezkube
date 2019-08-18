@@ -1,44 +1,24 @@
-#!/bin/bash -e
+#!/bin/bash
+
+PARENT_NAMESPACE=/aporeto/se/demo/v1
 
 function main() {
-  which kubectl > /dev/null 2>&1 || { err "Warning: kubectl not in path"; }
-  which aws > /dev/null 2>&1 || { err "Warning: aws not in path"; }
-  which kops > /dev/null 2>&1 || { err "Warning: kops not in path"; }
-  which ssh-keygen > /dev/null 2>&1 || { err "Warning: kops not in path"; }
-  which openssl > /dev/null 2>&1 || { err "Fatal: openssl not in path"; return 2; }
+  local directory=$1
+  [[ $directory ]] || { err "Usage:$0 directory"; return 2; }
+  [ -d $directory ] && { err "Directory $directory exist. Remove directory or use a different name"; return 2; }
+  [ -f $directory ] && { err "File $directory exist. Remove file or use a different name"; return 2; }
 
-  CLUSTER_NAME=$1
-  [[ $CLUSTER_NAME ]] || { err "Usage:$0 cluster_name"; return 2; }
-
-  local build=$CLUSTER_NAME-k8s-scripts
-  [ -d $build ] && { err "Directory $build already exist"; return 2; }
-  cp -r lib $build && cd $build
-  _settings > settings
-
-  err "See $build"
-}
-
-_settings()
-{
-cat <<EOF
-export PARENT_NAMESPACE=/aporeto/se/demo/v1
-export CLUSTER_NAME=$CLUSTER_NAME
-
-export DNS_DOMAIN="se.aporeto.io"
-export APOCTL_API="https://api.console.aporeto.com"
-
-export CLOUD_PROVIDER=AWS
-export AWS_KUBE_REGION="us-east-1"
-export AWS_KUBE_ZONE="a"
-export AWS_KUBE_VERSION="1.9.11"
-export AWS_KUBE_MASTER_SIZE="t2.medium"
-export AWS_KUBE_NODE_SIZE="t2.medium"
-export AWS_KUBE_IMAGE="439917055340/kube-jessie-enforcerd"
-export AWS_KUBE_NODE_COUNT="2"
-export AWS_KUBE_CNI="amazon-vpc-routed-eni"
-export AWS_ACCOUNT="439917055340"
-export AWS_DOMAIN_ID=Z12AZDZQXW3TZN
-EOF
+  parentdir=$(dirname $directory)
+  [ -f $parentdir ] && { err "parent must be a directory not a file"; return 2; }
+  [ -d $parentdir ] || { mkdir -p $parentdir; }
+  cp -r lib $directory
+  cd $directory
+  mv settings _settings
+  echo "export CLUSTER_NAME=$(basename $directory)" > settings
+  echo "export PARENT_NAMESPACE=$PARENT_NAMESPACE" >> settings
+  cat _settings >> settings
+  rm _settings
+  err "done"
 }
 
 err() { echo "$@" 1>&2; }

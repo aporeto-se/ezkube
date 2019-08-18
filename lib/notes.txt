@@ -1,0 +1,2 @@
+# Load kubeconfig into current shell env
+export KUBECONFIG=$PWD/kube.config

@@ -9,18 +9,11 @@ function main() {
   [ $fatal -eq 1 ] && { err "Unable to continue. See above."; return 2; }
 
   FQDN=${CLUSTER_NAME}.${DNS_DOMAIN}
-  [[ "$CLOUD_PROVIDER" == "AWS" ]] && { _aws; return $?; }
-  err "CLOUD_PROVIDER $CLOUD_PROVIDER not known"
-  return 2
-}
 
-_aws() {
-  local fatal=0
   local bucket="s3://k8s.${FQDN}"
-
-  set -x
-  kops delete cluster --name $FQDN --state=${bucket}/state --yes
-  aws s3 rb $bucket --force
+  export KUBECONFIG=${PWD}/kube.config
+  [ -f kube.config ] || { kops export kubecfg $FQDN --state=${bucket}/state; }
+  kubectl get nodes --show-labels
 }
 
 err() { echo "$@" 1>&2; }

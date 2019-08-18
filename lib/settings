@@ -1,0 +1,14 @@
+export DNS_DOMAIN="se.aporeto.io"
+export APOCTL_API="https://api.console.aporeto.com"
+
+export CLOUD_PROVIDER=AWS
+export AWS_KUBE_REGION="us-east-1"
+export AWS_KUBE_ZONE="a"
+export AWS_KUBE_VERSION="1.9.11"
+export AWS_KUBE_MASTER_SIZE="t2.medium"
+export AWS_KUBE_NODE_SIZE="t2.medium"
+export AWS_KUBE_IMAGE="439917055340/kube-jessie-enforcerd"
+export AWS_KUBE_NODE_COUNT="2"
+export AWS_KUBE_CNI="amazon-vpc-routed-eni"
+export AWS_ACCOUNT="439917055340"
+export AWS_DOMAIN_ID=Z12AZDZQXW3TZN

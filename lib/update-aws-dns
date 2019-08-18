@@ -1,50 +1,52 @@
-#!/bin/bash -e
+#!/bin/bash
 
 function main() {
   cd $(dirname $0)
   [ -f settings ] && . settings || { err "file settings not found"; return 2; }
   local fatal=0
-  [[ $CLOUD_PROVIDER ]] || { err "Missing setting CLOUD_PROVIDER"; fatal=1; }
-  [[ $CLUSTER_NAME ]] || { err "Missing setting CLUSTER_NAME"; fatal=1; }
-  [[ $DNS_DOMAIN ]] || { err "Missing setting DNS_DOMAIN"; fatal=1; }
-  [[ $AWS_KUBE_REGION ]] || { err "Missing setting AWS_KUBE_REGION"; fatal=1; }
-  [[ $AWS_KUBE_ZONE ]] || { err "Missing setting AWS_KUBE_ZONE"; fatal=1; }
-  [[ $AWS_DOMAIN_ID ]] || { err "Missing setting AWS_DOMAIN_ID"; fatal=1; }
-  [ $fatal -eq 1 ] && return 2
+  ./check-system || { fatal=1; }
+  ./check-config || { fatal=1; }
+  [ $fatal -eq 1 ] && { err "Unable to continue. See above."; return 2; }
 
   [[ "$CLOUD_PROVIDER" == "AWS" ]] || { err "Cloud provider must be AWS"; return 2; }
 
-  FQDN=${CLUSTER_NAME}.${DNS_DOMAIN}
+  local fqdn=${CLUSTER_NAME}.${DNS_DOMAIN}
 
-  trap _cleanup EXIT
-  TMP=$(mktemp)
-  _setip
-  _update
+  err "Attempting to get IP from AWS API"
+  local ip=$(_getip)
+  [[ $ip ]] || { err "IP not found"; return 3; }
+  err "Retrieved ip $ip"
+
+  err "Attempting to update record A record api.$fqdn with IP $ip"
+  _setip $fqdn $ip || { err "Failed to update record"; return 4; }
   err "Completed successfully"
 }
 
-function _cleanup {
-  [[ $TMP ]] && rm -rf $TMP;
+_getip() {
+  local values=master-${AWS_KUBE_REGION}${AWS_KUBE_ZONE}.masters.${CLUSTER_NAME}.${DNS_DOMAIN}
+  echo $(
+    aws ec2 --region $AWS_KUBE_REGION describe-instances --filters Name=tag:Name,Values=$values \
+    --query "Reservations[*].Instances[*].PublicIpAddress" --output=text
+  )
 }
 
-_setip()
-{
-local values=master-${AWS_KUBE_REGION}${AWS_KUBE_ZONE}.masters.${CLUSTER_NAME}.${DNS_DOMAIN}
-while [ true ]; do
-  ip=$(aws ec2 --region $AWS_KUBE_REGION describe-instances --filters Name=tag:Name,Values=$values --query "Reservations[*].Instances[*].PublicIpAddress" --output=text)
-  [[ $ip ]] && break
-  { err "IP not found; will try again in 5 seconds"; }
-  sleep 5
-done
+_setip() {
+    aws route53 change-resource-record-sets --hosted-zone-id $AWS_DOMAIN_ID \
+    --change-batch "$(_json_a_record $fqdn $ip)"
+}
 
-cat <<EOF > $TMP
+_json_a_record()
+{
+local fqdn=$1
+local ip=$2
+cat <<EOF
 {
   "Comment": "Update A Record",
   "Changes": [
     {
       "Action": "UPSERT",
       "ResourceRecordSet": {
-        "Name": "api.$FQDN",
+        "Name": "api.$fqdn",
         "Type": "A",
         "TTL": 10,
         "ResourceRecords": [
@@ -57,15 +59,6 @@ cat <<EOF > $TMP
   ]
 }
 EOF
-}
-
-_update() {
-  while [ true ]; do
-    err "Updating A record api.$FQDN with IP $ip"
-    aws route53 change-resource-record-sets --hosted-zone-id $AWS_DOMAIN_ID --change-batch file://$TMP && { err "record updated"; return 0; }
-    err "Updated failed; will try again in 5 seconds"
-    sleep 5
-  done
 }
 
 err() { echo "$@" 1>&2; }

@@ -1,13 +1,14 @@
 #!/bin/bash
 
+RETRY_INT=10
+
 function main() {
   cd $(dirname $0)
   [ -f settings ] && . settings || { err "file settings not found"; return 2; }
   local fatal=0
-  [[ $CLOUD_PROVIDER ]] || { err "Missing setting CLOUD_PROVIDER"; fatal=1; }
-  [[ $CLUSTER_NAME ]] || { err "Missing setting CLUSTER_NAME"; fatal=1; }
-  [[ $DNS_DOMAIN ]] || { err "Missing setting DNS_DOMAIN"; fatal=1; }
-  [ $fatal -eq 1 ] && return 2
+  ./check-system || { fatal=1; }
+  ./check-config || { fatal=1; }
+  [ $fatal -eq 1 ] && { err "Unable to continue. See above."; return 2; }
 
   SSHKEY=${HOME}/.ssh/aporeto_lab
   FQDN=${CLUSTER_NAME}.${DNS_DOMAIN}
@@ -53,10 +54,19 @@ _aws() {
   [[ $AWS_KUBE_CNI ]] && kops+=" --networking=$AWS_KUBE_CNI"
   kops+=" --yes"
   export KUBECONFIG=$PWD/kube.config
-  set -x
   aws s3 mb $bucket || return $?
   $kops || return $?
   kops export kubecfg $FQDN --state=${bucket}/state || return $?
+  err "Applying DNS fix, this may take a few minutes"
+  while [ true ]; do
+    ./update-aws-dns && break || {
+      err "Unable to update AWS DNS; will try again in $RETRY_INT"
+      sleep $RETRY_INT
+    }
+  done
+  err "DNS Updated"
+
+  err "Completed successfully"
 }
 
 err() { echo "$@" 1>&2; }

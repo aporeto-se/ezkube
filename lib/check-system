@@ -1,0 +1,18 @@
+#!/bin/bash
+
+function main() {
+  cd $(dirname $0)
+  [ -f settings ] && . settings || { err "file settings not found"; return 2; }
+  local fatal=0
+  which kubectl > /dev/null 2>&1 || { err "kubectl not in path"; fatal=1; }
+  which aws > /dev/null 2>&1 || { err "aws not in path"; fatal=1; }
+  which kops > /dev/null 2>&1 || { err "kops not in path"; fatal=1; }
+  which ssh-keygen > /dev/null 2>&1 || { err "kops not in path"; fatal=1; }
+  which openssl > /dev/null 2>&1 || { err "openssl not in path"; fatal=1; }
+  [ $fatal -eq 1 ] && { err "system is not ready"; return 2; }
+  return 0
+}
+
+err() { echo "$@" 1>&2; }
+
+main $@
