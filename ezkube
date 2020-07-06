@@ -1,24 +1,431 @@
 #!/bin/bash
 
-PARENT_NAMESPACE=/aporeto/se/demo/v1
+MASTER_SIZE_DEFAULT="t2.medium"
+NODE_SIZE_DEFAULT="t2.medium"
+NODE_COUNT_DEFAULT="2"
+REGION_DEFAULT="us-east-2"
+ZONE_DEFAULT="a"
+ACCOUNT_DEFAULT="439917055340"
+DNS_DOMAIN_DEFAULT="se.aporeto.io"
+DOMAIN_ID_DEFAULT=Z12AZDZQXW3TZN
 
-function main() {
-  local directory=$1
-  [[ $directory ]] || { err "Usage:$0 directory"; return 2; }
-  [ -d $directory ] && { err "Directory $directory exist. Remove directory or use a different name"; return 2; }
-  [ -f $directory ] && { err "File $directory exist. Remove file or use a different name"; return 2; }
+# DEUBG=true
 
-  parentdir=$(dirname $directory)
-  [ -f $parentdir ] && { err "parent must be a directory not a file"; return 2; }
-  [ -d $parentdir ] || { mkdir -p $parentdir; }
-  cp -r lib $directory
-  cd $directory
-  mv settings _settings
-  echo "export CLUSTER_NAME=$(basename $directory)" > settings
-  echo "export PARENT_NAMESPACE=$PARENT_NAMESPACE" >> settings
-  cat _settings >> settings
-  rm _settings
-  err "done"
+# This command 'ssh-keygen -y -f key' can be used to derive the SSH public key
+# from the private key
+
+main() {
+  local fatal=0
+  which kubectl > /dev/null 2>&1 || { err "kubectl not in path"; fatal=1; }
+  which aws > /dev/null 2>&1 || { err "aws not in path"; fatal=1; }
+  which kops > /dev/null 2>&1 || { err "kops not in path"; fatal=1; }
+  which ssh-keygen > /dev/null 2>&1 || { err "kops not in path"; fatal=1; }
+  which openssl > /dev/null 2>&1 || { err "openssl not in path"; fatal=1; }
+  [ $fatal -eq 1 ] && { err "Unable to continue"; return 2; }
+
+  local usage="Usage:$0 (create|delete|config|key|list)"
+
+  trap cleanup EXIT
+
+  case "$1" in
+    create) shift; create $@ ;;
+    delete) shift; delete $@ ;;
+    config) shift; config $@ ;;
+    key) shift; key $@ ;;
+    list) shift; list $@ ;;
+    *) err $usage; return 2;
+  esac
+}
+
+function cleanup() {
+  [[ $tmp ]] || return 
+  [ -d $tmp ] && rm -rf $tmp
+}
+
+function create() {
+  tmp=$(mktemp -d)
+  log=$tmp/log
+  local key=$tmp/key
+  local pub=$tmp/key.pub
+  local cmd=""
+
+  # If clustername is FQDN we just want the cluster name
+  clusterNameInput=$1
+  [[ $clusterNameInput ]] || { err "Usage:$0 create cluster_name"; return 2; }
+
+  clusterName=$(echo $clusterNameInput | awk -F. '{ print $1 }')
+  [[ $clusterName ]] || { err "Usage:$0 $action cluster_name"; return 2; }
+
+  dnsDomain=$(echo $fqdn | awk -F. '{for (i=2; i<NF; i++) printf $i "."; print $NF}')
+  [[ $dnsDomain ]] && {
+    err "Using DNS_DOMAIN=$dnsDomain"
+  } || {
+    err "Using DNS_DOMAIN=$DNS_DOMAIN_DEFAULT (default)"
+    dnsDomain=$DNS_DOMAIN_DEFAULT
+  }
+
+  fqdn="${clusterName}.${dnsDomain}"
+  err "Using FQDN=$fqdn"
+
+  bucket="s3://ezkube/${fqdn}"
+  err "Using BUCKET=$bucket"
+
+  zone=""
+  [[ $ZONE ]] && {
+    err "Using ZONE=$ZONE"
+    zone=$ZONE
+  } || {
+    err "Using ZONE=$ZONE_DEFAULT (default)"
+    zone=$ZONE_DEFAULT
+  }
+
+  masterSize=""
+  [[ $MASTER_SIZE ]] && {
+    err "Using MASTER_SIZE=$MASTER_SIZE"
+    masterSize=$MASTER_SIZE
+  } || {
+    err "Using MASTER_SIZE=$MASTER_SIZE_DEFAULT (default)"
+    masterSize=$MASTER_SIZE_DEFAULT
+  }
+
+  nodeSize=""
+  [[ $NODE_SIZE ]] && {
+     err "Using NODE_SIZE=$NODE_SIZE"
+     nodeSize=$NODE_SIZE
+  } || {
+    err "Using NODE_SIZE=$NODE_SIZE_DEFAULT (default)"
+   nodeSize=$NODE_SIZE_DEFAULT
+  }
+
+  nodeCount=""
+  [[ $NODE_COUNT ]] && {
+    err "Using NODE_COUNT=$NODE_COUNT"
+    nodeCount=$NODE_COUNT
+  } || {
+    err "Using NODE_COUNT=$NODE_COUNT_DEFAULT (default)"
+    nodeCount=$NODE_COUNT_DEFAULT
+   }
+
+  region=""
+  [[ $REGION ]] && {
+    err "Using REGION=$REGION"
+    region=$REGION
+  } || {
+    err "Using REGION=$REGION_DEFAULT (default)"
+    region=$REGION_DEFAULT
+  }
+
+  version=""
+  [[ $VERSION ]] && {
+    err "Using specified version $VERSION"
+    version=$VERSION
+  } || {
+    err "kops will use latest default version"
+  }
+
+  domainId=""
+  [[ $DOMAIN_ID ]] && {
+    err "Using DOMAIN_ID=$DOMAIN_ID"
+    domainId=$DOMAIN_ID
+  } || {
+    err "Using DOMAIN_ID=$DOMAIN_ID_DEFAULT (default)"
+    domainId=$DOMAIN_ID_DEFAULT
+  }
+
+  zones="${region}${zone}"
+
+  local privateSshKey=$tmp/privatekey
+  local publicSshKey=$tmp/publickey
+
+  echo "cmd->aws s3 ls $bucket" >> $log
+  aws s3 ls $bucket >> $log 2>&1 && {
+    err "AWS Bucket Exist! Aborting!!!"
+    return 2
+  }
+
+  err "Resolving default VPC ID"
+  local vpcId=$(
+    aws ec2 describe-vpcs --region $region --filters "Name=isDefault,Values=true" \
+    --query "Vpcs[*].VpcId" --output=text
+  )
+  [[ $vpcId ]] && { 
+    err "VPC ID is $vpcId"
+  } || {
+    err "Unable to determine default VPC ID"
+      return 2
+  }
+
+  err "Resolving default subnet ID"
+  local subnetId=$(
+    aws ec2 describe-subnets --region $region \
+    --filters "Name=vpc-id,Values=${vpcId}" "Name=defaultForAz,Values=true" \
+    --query "Subnets[0].SubnetId" --output=text \
+  )
+  [[ $subnetId ]] && {
+    err "Subnet ID is $subnetId"
+  } || {
+    err "Unable to determine default Subnet ID"
+      return 2
+  }
+
+  err "Generating SSH key"
+  echo "ssh-keygen -t RSA -b 4096 -f $key -N \"\"" >> $log
+  ssh-keygen -t RSA -b 4096 -f $key -N "" 2>&1 >> $log || {
+    err "Failed to create ssh key"
+    return 2
+  }
+
+  err "Copying SSH key to AWS"
+  echo "cmd->aws s3 cp $key ${bucket}/key" >> $log
+  aws s3 cp $key ${bucket}/key 2>&1 >> $log || {
+    err "Failed to copy key to bucket"
+    cat $log 1>&2
+    return 3
+  }
+  err "SSH key copied to AWS bucket"
+
+  local kops="kops create cluster --cloud=aws"
+  kops+=" --vpc $vpcId"
+  kops+=" --subnets $subnetId"
+  kops+=" --networking=amazon-vpc-routed-eni"
+  kops+=" --name $fqdn"
+  kops+=" --zones=$zones"
+  # kops+=" --associate-public-ip=false"
+  kops+=" --ssh-public-key=$pub"
+  kops+=" --state=${bucket}/state"
+  kops+=" --master-size=$masterSize"
+  kops+=" --node-size=$nodeSize"
+  kops+=" --node-count=$nodeCount"
+  kops+=" --yes"
+
+  err "Creating cluster"
+  echo "cmd->$kops" >> $log
+  $kops || {
+    err "Failed to create cluster"
+    cat $log 1>&2
+    return 3
+  }
+  err "Cluster created; pausing for 10 seconds"
+  sleep 10
+
+  err "Resolving IP of master node"
+  cmd="aws ec2 --region $region describe-instances --filters"
+  cmd+="Name=iam-instance-profile.arn,Values=*masters.$fqdn\""
+  cmd+="--query \"Reservations[*].Instances[*].PublicIpAddress\" --output text"
+  echo "cmd->$cmd" >> $log
+  i=0
+  local ip=""
+  while true; do
+    i=$((i+1))
+    ip=$(aws ec2 --region $region describe-instances \
+      --filters "Name=iam-instance-profile.arn,Values=*masters.$fqdn" \
+      --query "Reservations[*].Instances[*].PublicIpAddress" --output text
+    )
+    [[ $ip ]] && break
+    [ $i -gt 10 ] && {
+      cat $log 1>&2
+      err "Unable to get instance IP; giving up"
+      return 2
+    }
+    err "Waiting for instance IP"
+    sleep 5
+  done
+  err "IP is $ip"
+
+  cmd="aws route53 change-resource-record-sets --hosted-zone-id $domainId"
+  cmd+=" --change-batch \"$(_json_a_record $fqdn $ip)\""
+  echo "cmd->$cmd" >> $log
+  i=0
+  while true; do
+    i=$((i+1))
+    aws route53 change-resource-record-sets --hosted-zone-id $domainId \
+       --change-batch "$(_json_a_record $fqdn $ip)" >> $log 2>&1 && break
+    [ $i -gt 10 ] && { 
+      cat $log 1>&2
+      err "Unable to create/update dns"
+      return 2
+    }
+    err "DNS update failed, will try again"
+    sleep 5
+  done
+  err "DNS updated. Install is complete. Cluster should be online soon"
+  return 0
+}
+
+function delete() {
+  # If clustername is FQDN we just want the cluster name
+  clusterNameInput=$1
+  [[ $clusterNameInput ]] || { err "Usage:$0 delete cluster_name"; return 2; }
+
+  clusterName=$(echo $clusterNameInput | awk -F. '{ print $1 }')
+  [[ $clusterName ]] || { err "Usage:$0 $action cluster_name"; return 2; }
+
+  dnsDomain=$(echo $fqdn | awk -F. '{for (i=2; i<NF; i++) printf $i "."; print $NF}')
+  [[ $dnsDomain ]] && {
+    err "Using DNS_DOMAIN=$dnsDomain"
+  } || {
+   err "Using DNS_DOMAIN=$DNS_DOMAIN_DEFAULT (default)"
+   dnsDomain=$DNS_DOMAIN_DEFAULT
+  }
+
+  fqdn="${clusterName}.${dnsDomain}"
+  err "Using FQDN=$fqdn"
+
+  bucket="s3://ezkube/${fqdn}"
+  err "Using BUCKET=$bucket"
+
+  tmp=$(mktemp -d)
+  local log=$tmp/log
+  local cmd=""
+  err "Deleting cluster"
+
+  cmd="kops delete cluster --name $fqdn --state=${bucket}/state --yes"
+  echo "cmd->$cmd" >> $log
+  kops delete cluster --name $fqdn --state=${bucket}/state --yes >> $log 2>&1 || {
+    err "Cluster delete failed"
+    cat $log 1>&2
+    return 2
+  }
+
+  err "Deleting bucket"
+  echo "cmd->aws s3 rm $bucket --recursive" >> $log
+  aws s3 rm $bucket --recursive >> $log 2>&1 || {
+    err "Failed to delete bucket"
+    cat $log 1>&2
+    return 2
+  }
+}
+
+function config() {
+  local usage="Usage:$0 config cluster_name output_filename"
+  # If clustername is FQDN we just want the cluster name
+  clusterNameInput=$1
+  filename=$2
+  [[ $clusterNameInput ]] || { err $usage; return 2; }
+  [[ $filename ]] || { err $usage; return 2; }
+
+  [ -f $filename ] && { err "File $filename already exist"; return 2; }
+
+  local outputDir=$(dirname $filename)
+  [ -d $outputDir ] || {
+    mkdir -p $outputDir || {
+      err "Failed to create directory $outputDir"
+      return 2;
+    }
+  }
+
+  touch $filename > /dev/null 2>&1 || {
+    err "Unable to write file $filename"
+    return 2
+  }
+  rm -rf $filename
+
+  clusterName=$(echo $clusterNameInput | awk -F. '{ print $1 }')
+  [[ $clusterName ]] || { err "Usage:$0 $action cluster_name"; return 2; }
+
+  dnsDomain=$(echo $fqdn | awk -F. '{for (i=2; i<NF; i++) printf $i "."; print $NF}')
+  [[ $dnsDomain ]] && {
+    err "Using DNS_DOMAIN=$dnsDomain"
+  } || {
+   err "Using DNS_DOMAIN=$DNS_DOMAIN_DEFAULT (default)"
+   dnsDomain=$DNS_DOMAIN_DEFAULT
+  }
+
+  fqdn="${clusterName}.${dnsDomain}"
+  err "Using FQDN=$fqdn"
+
+  bucket="s3://ezkube/${fqdn}"
+  err "Using BUCKET=$bucket"
+
+  tmp=$(mktemp -d)
+  local log=$tmp/log
+  export KUBECONFIG=$filename
+  kops export kubecfg $fqdn --state=${bucket}/state > $log 2>&1 || {
+    err "Failed to get config"
+    cat $log 1>&2
+    return 2
+  }
+}
+
+function key() {
+  # If clustername is FQDN we just want the cluster name
+  local usage="Usage:$0 key cluster_name output_filename"
+  clusterNameInput=$1
+  filename=$2
+  [[ $clusterNameInput ]] || { err $usage; return 2; }
+  [[ $filename ]] || { err $usage; return 2; }
+
+  [ -f $filename ] && { err "File $filename already exist"; return 2; } 
+
+  local outputDir=$(dirname $filename)
+  [ -d $outputDir ] || {
+    mkdir -p $outputDir || { err "Failed to create directory $outputDir"; return 2; }
+  }
+
+  touch $filename > /dev/null 2>&1 || {
+    err "Unable to write file $filename"
+    return 2
+  }
+  rm -rf $filename
+
+  clusterName=$(echo $clusterNameInput | awk -F. '{ print $1 }')
+  [[ $clusterName ]] || { err "Usage:$0 $action cluster_name"; return 2; }
+
+  dnsDomain=$(echo $fqdn | awk -F. '{for (i=2; i<NF; i++) printf $i "."; print $NF}')
+  [[ $dnsDomain ]] && {
+    err "Using DNS_DOMAIN=$dnsDomain"
+  } || {
+   err "Using DNS_DOMAIN=$DNS_DOMAIN_DEFAULT (default)"
+   dnsDomain=$DNS_DOMAIN_DEFAULT
+  }
+
+  fqdn="${clusterName}.${dnsDomain}"
+  err "Using FQDN=$fqdn"
+
+  bucket="s3://ezkube/${fqdn}"
+  err "Using BUCKET=$bucket"
+
+  tmp=$(mktemp -d)
+  local log=$tmp/log
+  aws s3 cp $bucket/key $filename >> $log 2>&1 || {
+    err "Get key failed"
+    cat $log 1>&2
+    return 2
+  }
+  chmod 400 $filename || {
+    err "Failed to set perm 0400 on file $filename";
+    return 2
+  }
+}
+
+function list() {
+  aws s3 ls s3:// | grep k8s | awk '{print  $3}'
+}
+
+_json_a_record()
+{
+local fqdn=$1
+local ip=$2
+cat <<EOF
+{
+  "Comment": "Update A Record",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "api.$fqdn",
+        "Type": "A",
+        "TTL": 10,
+        "ResourceRecords": [
+          {
+            "Value": "$ip"
+          }
+        ]
+      }
+    }
+  ]
+}
+EOF
 }
 
 err() { echo "$@" 1>&2; }
