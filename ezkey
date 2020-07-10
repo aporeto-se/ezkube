@@ -117,7 +117,7 @@ function get() {
   rm -rf $file
 
   echo "aws s3 cp $remoteKey $file" > $log
-  aws s3 cp $remoteKey $file >> $log 2>&1 && {
+  aws s3 cp $remoteKey $file >> $log 2>&1 || {
     cat $log 1>&2
     return 2
   }
