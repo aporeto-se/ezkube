@@ -1,0 +1,132 @@
+#!/bin/bash
+
+MASTER_SIZE_DEFAULT="t2.medium"
+NODE_SIZE_DEFAULT="t2.medium"
+NODE_COUNT_DEFAULT="2"
+REGION_DEFAULT="us-east-2"
+ZONE_DEFAULT="a"
+ACCOUNT_DEFAULT="439917055340"
+DNS_DOMAIN_DEFAULT="se.aporeto.io"
+DOMAIN_ID_DEFAULT=Z12AZDZQXW3TZN
+
+# DEUBG=true
+
+# This command 'ssh-keygen -y -f key' can be used to derive the SSH public key
+# from the private key
+
+main() {
+  local fatal=0
+  which aws > /dev/null 2>&1 || { err "aws not in path"; fatal=1; }
+  which ssh-keygen > /dev/null 2>&1 || { err "kops not in path"; fatal=1; }
+  [ $fatal -eq 1 ] && { err "Unable to continue"; return 2; }
+
+  local usage="Usage:$0 (create|delete|list|get)"
+
+  trap cleanup EXIT
+  tmp=$(mktemp -d)
+  log=$tmp/log
+
+  case "$1" in
+    create) shift; create $@ ;;
+    delete) shift; delete $@ ;;
+    list) shift; list $@ ;;
+    ls) shift; list $@ ;;
+    get) shift; get $@ ;;
+    *) err $usage; return 2;
+  esac
+}
+
+function cleanup() { [ -d $tmp ] && rm -rf $tmp; }
+
+function create() {
+  local usage="Usage:$0 create name"
+  local name=$1
+
+  [[ $name ]] || { err $usage; return 2; }
+
+  local remoteKey="s3://ezkey/${name}"
+
+  aws s3 ls $remoteKey >> /dev/null 2>&1 && {
+    err "Key with name $name already exist"
+    return 2
+  }
+
+  local key=$tmp/key
+
+  err "Generating Key"
+  echo "ssh-keygen -t RSA -b 4096 -f $key -N \"\"" > $log
+  ssh-keygen -t RSA -b 4096 -f $key -N "" 2>&1 >> $log || {
+    err "Failed to create ssh key"
+    return 2
+  }
+
+  err "Copying Key to AWS"
+  echo "cmd->aws s3 cp $key $remoteKey" > $log
+  aws s3 cp $key $remoteKey 2>&1 >> $log || {
+    err "Failed to copy key S3"
+    cat $log 1>&2
+    return 3
+  }
+  err "Key created"
+  return 0
+}
+
+function delete() {
+  local usage="Usage:$0 delete name"
+  local name=$1
+
+  [[ $name ]] || { err $usage; return 2; }
+
+  remoteKey="s3://ezkey/${name}"
+
+  aws s3 ls $remoteKey >> /dev/null 2>&1 && {
+    err "Key with name $name does not exist"
+    return 2
+  }
+
+  echo "aws s3 rm $remoteKey" > $log
+  aws s3 rm $remoteKey >> $log 2>&1 && {
+    cat $log 1>&2
+    return 2
+  }
+
+  return 0
+}
+
+function list() {
+  aws s3 ls s3://ezkey | awk '{print $4}'
+}
+
+function get() {
+  local usage="Usage:$0 get name"
+  local name=$1
+  local file=$2
+
+  [[ $name ]] || { err $usage; return 2; }
+  [[ $file ]] || { err $usage; return 2; }
+
+  remoteKey="s3://ezkey/${name}"
+
+  aws s3 ls $remoteKey >> /dev/null 2>&1 || {
+    err "Key with name $name does not exist"
+    return 2
+  }
+
+  mkdir -p $(dirname $file) || { err "Failed to create directory"; return 2; }
+  touch $file || { err "Failed to create file"; return 2; }
+  rm -rf $file
+
+  echo "aws s3 cp $remoteKey $file" > $log
+  aws s3 cp $remoteKey $file >> $log 2>&1 && {
+    cat $log 1>&2
+    return 2
+  }
+  chmod 400 $file
+
+  return 0
+}
+
+
+err() { echo "$@" 1>&2; }
+
+main $@
