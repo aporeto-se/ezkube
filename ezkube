@@ -329,7 +329,7 @@ function config() {
   }
 }
 
-function list() { aws s3 ls s3://ezkube | grep k8s | awk '{print  $3}'; }
+function list() { aws s3 ls s3://ezkube | grep PRE | awk '{print  $2}' | awk -F/ '{print $1}'; }
 
 _json_a_record()
 {
