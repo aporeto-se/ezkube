@@ -20,7 +20,7 @@ main() {
   which ssh-keygen > /dev/null 2>&1 || { err "kops not in path"; fatal=1; }
   [ $fatal -eq 1 ] && { err "Unable to continue"; return 2; }
 
-  local usage="Usage:$0 (create|delete|list|get)"
+  local usage="Usage:$0 (create|delete|list|get|install)"
 
   trap cleanup EXIT
   tmp=$(mktemp -d)
@@ -100,10 +100,8 @@ function list() {
 function get() {
   local usage="Usage:$0 get name"
   local name=$1
-  local file=$2
 
   [[ $name ]] || { err $usage; return 2; }
-  [[ $file ]] || { err $usage; return 2; }
 
   remoteKey="s3://ezkey/${name}"
 
@@ -112,17 +110,18 @@ function get() {
     return 2
   }
 
-  mkdir -p $(dirname $file) || { err "Failed to create directory"; return 2; }
-  touch $file || { err "Failed to create file"; return 2; }
-  rm -rf $file
+  local keyfile=$(mktemp)
+  rm -rf $keyfile
 
-  echo "aws s3 cp $remoteKey $file" > $log
-  aws s3 cp $remoteKey $file >> $log 2>&1 || {
+  echo "aws s3 cp $remoteKey $keyfile" > $log
+  aws s3 cp $remoteKey $keyfile >> $log 2>&1 || {
     cat $log 1>&2
+    rm -rf $keyfile
     return 2
   }
-  chmod 400 $file
-
+  chmod 400 $keyfile
+  ssh-add $keyfile
+  rm -rf $keyfile
   return 0
 }
 
