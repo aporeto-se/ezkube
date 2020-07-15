@@ -34,9 +34,19 @@ main() {
 
   case "$1" in
     create) shift; create $@ ;;
+    creat) shift; create $@ ;;
+    crea) shift; create $@ ;;
+    cre) shift; create $@ ;;
+    cr) shift; create $@ ;;
     delete) shift; delete $@ ;;
     config) shift; config $@ ;;
+    confi) shift; config $@ ;;
+    conf) shift; config $@ ;;
+    con) shift; config $@ ;;
+    co) shift; config $@ ;;
     list) shift; list $@ ;;
+    ls) shift; list $@ ;;
+    l) shift; list $@ ;;
     *) err $usage; return 2;
   esac
 }
