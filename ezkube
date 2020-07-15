@@ -280,28 +280,10 @@ function delete() {
 }
 
 function config() {
-  local usage="Usage:$0 config cluster_name output_filename"
+  local usage="Usage:$0 config cluster_name"
   # If clustername is FQDN we just want the cluster name
   clusterNameInput=$1
-  filename=$2
   [[ $clusterNameInput ]] || { err $usage; return 2; }
-  [[ $filename ]] || { err $usage; return 2; }
-
-  [ -f $filename ] && { err "File $filename already exist"; return 2; }
-
-  local outputDir=$(dirname $filename)
-  [ -d $outputDir ] || {
-    mkdir -p $outputDir || {
-      err "Failed to create directory $outputDir"
-      return 2;
-    }
-  }
-
-  touch $filename > /dev/null 2>&1 || {
-    err "Unable to write file $filename"
-    return 2
-  }
-  rm -rf $filename
 
   clusterName=$(echo $clusterNameInput | awk -F. '{ print $1 }')
   [[ $clusterName ]] || { err "Usage:$0 $action cluster_name"; return 2; }
@@ -320,8 +302,6 @@ function config() {
   bucket="s3://ezkube/${fqdn}"
   err "Using BUCKET=$bucket"
 
-  export KUBECONFIG=$filename
-  rm -rf $KUBECONFIG
   kops export kubecfg $fqdn --state=${bucket}/state > $log 2>&1 || {
     err "Failed to get config"
     cat $log 1>&2
