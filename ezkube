@@ -18,11 +18,9 @@ DOMAIN_ID_DEFAULT=Z12AZDZQXW3TZN
 
 main() {
   local fatal=0
-  which kubectl > /dev/null 2>&1 || { err "kubectl not in path"; fatal=1; }
   which aws > /dev/null 2>&1 || { err "aws not in path"; fatal=1; }
   which kops > /dev/null 2>&1 || { err "kops not in path"; fatal=1; }
   which ssh-keygen > /dev/null 2>&1 || { err "ssh-keygen not in path"; fatal=1; }
-  which ezkey > /dev/null 2>&1 || { err "ezkey not in path"; fatal=1; }
   [ $fatal -eq 1 ] && { err "Unable to continue"; return 2; }
 
   local usage="Usage:$0 (create|delete|config|list)"
@@ -51,7 +49,10 @@ main() {
   esac
 }
 
-function cleanup() { [ -d $tmp ] && rm -rf $tmp; }
+function cleanup() {
+  err $tmp
+  # [ -d $tmp ] && rm -rf $tmp;
+}
 
 function create() {
   # If clustername is FQDN we just want the cluster name
@@ -170,14 +171,27 @@ function create() {
       return 2
   }
 
-  echo "cmd->ezkey get $key $tmp/key" > $log
-  ezkey get $key $tmp/key >> $log 2>&1 || {
-    cat $log 1>&2
+  local remoteKey="s3://ezkey/${key}"
+
+  aws s3 ls $remoteKey >> /dev/null 2>&1 || {
+    err "Key with name $name does not exist"
     return 2
-  } 
+  }
+
+  echo "aws s3 cp $remoteKey $tmp/key" > $log
+  aws s3 cp $remoteKey $tmp/key >> $log 2>&1 || {
+    cat $log 1>&2
+    rm -rf $keyfile
+    return 2
+  }
+  chmod 400 $tmp/key
 
   # Extract public key from private key
-  ssh-keygen -y -f $tmp/key > $tmp/pub
+  echo "ssh-keygen -y -f $tmp/key > $tmp/pub" > $log
+  ssh-keygen -y -f $tmp/key > $tmp/pub || {
+    err "Failed to extract public key"
+    return 2
+  }
 
   local kops="kops create cluster --cloud=aws"
   kops+=" --vpc $vpcId"
@@ -185,7 +199,7 @@ function create() {
   kops+=" --networking=amazon-vpc-routed-eni"
   kops+=" --name $fqdn"
   kops+=" --zones=$zones"
-  # kops+=" --associate-public-ip=false"
+  kops+=" --associate-public-ip=false"
   kops+=" --ssh-public-key=$tmp/pub"
   kops+=" --state=${bucket}/state"
   kops+=" --master-size=$masterSize"
