@@ -27,7 +27,9 @@ main() {
 
   trap cleanup EXIT
   tmp=$(mktemp -d)
-  log=$tmp/log
+  log="/tmp/ezkube-${RANDOM}${RANDOM}.log"
+  touch $log || { err "Unable to write to /tmp"; return 2; }
+
   cmd=""
 
   case "$1" in
@@ -50,8 +52,8 @@ main() {
 }
 
 function cleanup() {
-  err $tmp
-  # [ -d $tmp ] && rm -rf $tmp;
+  [[ $tmp ]] && rm -rf $tmp;
+  err "Install file is $log"
 }
 
 function create() {
@@ -146,31 +148,6 @@ function create() {
     return 2
   }
 
-  err "Resolving default VPC ID"
-  local vpcId=$(
-    aws ec2 describe-vpcs --region $region --filters "Name=isDefault,Values=true" \
-    --query "Vpcs[*].VpcId" --output=text
-  )
-  [[ $vpcId ]] && { 
-    dlog "VPC ID is $vpcId"
-  } || {
-    err "Unable to determine default VPC ID"
-      return 2
-  }
-
-  err "Resolving default subnet ID"
-  local subnetId=$(
-    aws ec2 describe-subnets --region $region \
-    --filters "Name=vpc-id,Values=${vpcId}" "Name=defaultForAz,Values=true" \
-    --query "Subnets[0].SubnetId" --output=text \
-  )
-  [[ $subnetId ]] && {
-    dlog "Subnet ID is $subnetId"
-  } || {
-    err "Unable to determine default Subnet ID"
-      return 2
-  }
-
   local remoteKey="s3://ezkey/${key}"
 
   aws s3 ls $remoteKey >> /dev/null 2>&1 || {
@@ -178,28 +155,33 @@ function create() {
     return 2
   }
 
-  echo "aws s3 cp $remoteKey $tmp/key" > $log
+  dlog "aws s3 cp $remoteKey $tmp/key"
   aws s3 cp $remoteKey $tmp/key >> $log 2>&1 || {
-    cat $log 1>&2
     rm -rf $keyfile
+    err "Failed to copy key"
     return 2
   }
-  chmod 400 $tmp/key
 
-  # Extract public key from private key
-  echo "ssh-keygen -y -f $tmp/key > $tmp/pub" > $log
-  ssh-keygen -y -f $tmp/key > $tmp/pub || {
+  dlog "chmod 400 $tmp/key"
+  chmod 400 $tmp/key || {
+    err "Failed to chmod key"
+    return 2
+  }
+
+  # Extract public key from private key. Send err to log and stdout to file
+  dlog "ssh-keygen -y -f $tmp/key > $tmp/pub"
+  ssh-keygen -y -f $tmp/key > $tmp/pub 2>> $log || {
     err "Failed to extract public key"
     return 2
   }
 
   local kops="kops create cluster --cloud=aws"
-  kops+=" --vpc $vpcId"
-  kops+=" --subnets $subnetId"
+  # kops+=" --vpc $vpcId"
+  # kops+=" --subnets $subnetId"
   kops+=" --networking=amazon-vpc-routed-eni"
   kops+=" --name $fqdn"
   kops+=" --zones=$zones"
-  kops+=" --associate-public-ip=false"
+  kops+=" --associate-public-ip=true"
   kops+=" --ssh-public-key=$tmp/pub"
   kops+=" --state=${bucket}/state"
   kops+=" --master-size=$masterSize"
@@ -210,12 +192,13 @@ function create() {
   dlog "Running->$kops"
 
   err "Creating cluster"
-  echo "cmd->$kops" > $log
-  $kops || {
+  dlog "cmd->$kops"
+
+  $kops 2>> $log || {
     err "Failed to create cluster"
-    cat $log 1>&2
     return 3
   }
+
   err "Cluster created; pausing for 10 seconds"
   sleep 10
 
@@ -223,7 +206,7 @@ function create() {
   cmd="aws ec2 --region $region describe-instances --filters"
   cmd+="Name=iam-instance-profile.arn,Values=*masters.$fqdn\""
   cmd+="--query \"Reservations[*].Instances[*].PublicIpAddress\" --output text"
-  echo "cmd->$cmd" > $log
+  dlog "cmd->$cmd"
   i=0
   local ip=""
   while true; do
@@ -234,7 +217,6 @@ function create() {
     )
     [[ $ip ]] && break
     [ $i -gt 10 ] && {
-      cat $log 1>&2
       err "Unable to get instance IP; giving up"
       return 2
     }
@@ -245,7 +227,7 @@ function create() {
 
   cmd="aws route53 change-resource-record-sets --hosted-zone-id $domainId"
   cmd+=" --change-batch \"$(_json_a_record $fqdn $ip)\""
-  echo "cmd->$cmd" > $log
+  dlog "cmd->$cmd"
   i=0
   while true; do
     i=$((i+1))
@@ -259,7 +241,10 @@ function create() {
     err "DNS update failed, will try again"
     sleep 5
   done
-  err "DNS updated. Install is complete. Cluster should be online soon"
+  err "DNS updated; adding kube config to local"
+
+  _config || return $?
+  err "Cluster will be online soon"
   return 0
 }
 
@@ -272,33 +257,31 @@ function delete() {
 
   local dnsDomain=$(echo $fqdn | awk -F. '{for (i=2; i<NF; i++) printf $i "."; print $NF}')
   [[ $dnsDomain ]] && {
-    err "Using DNS_DOMAIN=$dnsDomain"
+    dlog "Using DNS_DOMAIN=$dnsDomain"
   } || {
-   err "Using DNS_DOMAIN=$DNS_DOMAIN_DEFAULT (default)"
+   dlog "Using DNS_DOMAIN=$DNS_DOMAIN_DEFAULT (default)"
    dnsDomain=$DNS_DOMAIN_DEFAULT
   }
 
   local fqdn="${clusterName}.${dnsDomain}"
-  err "Using FQDN=$fqdn"
+  dlog "Using FQDN=$fqdn"
 
   local bucket="s3://ezkube/${fqdn}"
-  err "Using BUCKET=$bucket"
+  dlog  "Using BUCKET=$bucket"
 
   err "Deleting cluster"
 
   cmd="kops delete cluster --name $fqdn --state=${bucket}/state --yes"
-  echo "cmd->$cmd" >> $log
+  dlog "cmd->$cmd"
   kops delete cluster --name $fqdn --state=${bucket}/state --yes >> $log 2>&1 || {
     err "Cluster delete failed"
-    cat $log 1>&2
     return 2
   }
 
   err "Deleting bucket"
-  echo "cmd->aws s3 rm $bucket --recursive" > $log
+  dlog "cmd->aws s3 rm $bucket --recursive"
   aws s3 rm $bucket --recursive >> $log 2>&1 || {
     err "Failed to delete bucket"
-    cat $log 1>&2
     return 2
   }
 }
@@ -314,21 +297,26 @@ function config() {
 
   dnsDomain=$(echo $fqdn | awk -F. '{for (i=2; i<NF; i++) printf $i "."; print $NF}')
   [[ $dnsDomain ]] && {
-    err "Using DNS_DOMAIN=$dnsDomain"
+    dlog "Using DNS_DOMAIN=$dnsDomain"
   } || {
-   err "Using DNS_DOMAIN=$DNS_DOMAIN_DEFAULT (default)"
+   dlog "Using DNS_DOMAIN=$DNS_DOMAIN_DEFAULT (default)"
    dnsDomain=$DNS_DOMAIN_DEFAULT
   }
 
   fqdn="${clusterName}.${dnsDomain}"
-  err "Using FQDN=$fqdn"
+  dlog "Using FQDN=$fqdn"
 
   bucket="s3://ezkube/${fqdn}"
-  err "Using BUCKET=$bucket"
+  dlog "Using BUCKET=$bucket"
 
-  kops export kubecfg $fqdn --state=${bucket}/state > $log 2>&1 || {
+  _config || return $?
+  return 0
+}
+
+function _config() {
+  dlog "kops export kubecfg $fqdn --state=${bucket}/state"
+  kops export kubecfg $fqdn --state=${bucket}/state >> $log 2>&1 || {
     err "Failed to get config"
-    cat $log 1>&2
     return 2
   }
 }
