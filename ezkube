@@ -315,7 +315,7 @@ function config() {
 
 function _config() {
   dlog "kops export kubecfg $fqdn --state=${bucket}/state"
-  kops export kubecfg $fqdn --state=${bucket}/state >> $log 2>&1 || {
+  kops export kubecfg $fqdn --admin --state=${bucket}/state >> $log 2>&1 || {
     err "Failed to get config"
     return 2
   }
